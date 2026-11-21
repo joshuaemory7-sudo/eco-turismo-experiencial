@@ -14,6 +14,18 @@ app.use(helmet());
 app.use(cors());
 app.use(express.json());
 
+app.get('/', (req, res) => {
+  res.json({
+    project: 'Eco Turismo Experiencial API',
+    endpoints: [
+      '/api/health',
+      '/api/db-check',
+      '/api/experiencias',
+      '/api/reservas',
+    ],
+  });
+});
+
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',

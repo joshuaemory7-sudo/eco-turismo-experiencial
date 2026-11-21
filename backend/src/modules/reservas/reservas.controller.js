@@ -10,6 +10,8 @@ async function listarReservas(req, res) {
         e.titulo AS experiencia_titulo,
         r.viajero_id,
         u.nombre AS viajero_nombre,
+        u.identificacion AS viajero_identificacion,
+        u.telefono AS viajero_telefono,
         r.fecha_inicio,
         r.fecha_fin,
         r.cupos,
@@ -106,13 +108,15 @@ async function obtenerReservaPorCodigo(req, res) {
         r.estado,
         r.codigo_validacion,
         e.titulo AS experiencia_titulo,
-        u.nombre AS viajero_nombre
+        u.nombre AS viajero_nombre,
+        u.identificacion AS viajero_identificacion,
+        u.telefono AS viajero_telefono
       FROM reservas r
       JOIN experiencias e ON e.id = r.experiencia_id
       JOIN usuarios u ON u.id = r.viajero_id
       WHERE r.codigo_validacion = $1
       `,
-      [codigo]
+      [codigo.trim().toUpperCase()]
     );
 
     if (result.rowCount === 0) {
@@ -125,8 +129,47 @@ async function obtenerReservaPorCodigo(req, res) {
   }
 }
 
+async function validarIngresoReserva(req, res) {
+  try {
+    const { codigo } = req.params;
+    const codigoLimpio = codigo.trim().toUpperCase();
+
+    const actualRes = await pool.query(
+      'SELECT id, estado FROM reservas WHERE codigo_validacion = $1',
+      [codigoLimpio]
+    );
+
+    if (actualRes.rowCount === 0) {
+      return res.status(404).json({ error: 'Código de reserva no encontrado.' });
+    }
+
+    const actual = actualRes.rows[0];
+    if (actual.estado === 'cancelada') {
+      return res.status(400).json({ error: 'La reserva está cancelada y no puede ingresar.' });
+    }
+
+    const updatedRes = await pool.query(
+      `
+      UPDATE reservas
+      SET estado = 'ingresada'
+      WHERE codigo_validacion = $1
+      RETURNING id, experiencia_id, viajero_id, fecha_inicio, fecha_fin, cupos, total_cop, estado, codigo_validacion
+      `,
+      [codigoLimpio]
+    );
+
+    res.json({
+      mensaje: 'Ingreso validado correctamente.',
+      reserva: updatedRes.rows[0],
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Error al validar ingreso de reserva', detalle: error.message });
+  }
+}
+
 module.exports = {
   listarReservas,
   crearReserva,
   obtenerReservaPorCodigo,
+  validarIngresoReserva,
 };

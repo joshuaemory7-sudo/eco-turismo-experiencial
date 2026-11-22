@@ -24,8 +24,8 @@ const nuevaExp = ref({
   categoria: 'alojamiento_eco',
   practicas_sostenibles: '',
   municipio: '',
-  lat: '4.7110',
-  lng: '-74.0721',
+  latitud: '4.7110',
+  longitud: '-74.0721',
   precio_cop: 150000,
   cupo_maximo: 4,
 });
@@ -34,13 +34,21 @@ const expError = ref('');
 
 const reservaForm = ref({
   experiencia_id: 1,
-  viajero_id: 2,
+  nombres: '',
+  apellidos: '',
+  telefono: '',
+  tipo_identificacion: 'CC',
+  identificacion: '',
   fecha_inicio: '2026-12-10',
   fecha_fin: '2026-12-12',
   cupos: 1,
 });
 const reservaCreada = ref(null);
 const reservaError = ref('');
+
+const experienciaSeleccionada = computed(() =>
+  experiencias.value.find((e) => e.id === reservaForm.value.experiencia_id) || null
+);
 
 const codigoConsulta = ref(urlParams.get('codigo') || '');
 const reservaConsultada = ref(null);
@@ -65,8 +73,11 @@ function construirPayloadQr(reserva) {
     proyecto: 'Eco Turismo Experiencial',
     codigo: reserva.codigo_validacion,
     estado: reserva.estado,
+    experiencia_id: reserva.experiencia_id,
     experiencia: reserva.experiencia_titulo || `ID ${reserva.experiencia_id}`,
-    viajero: reserva.viajero_nombre || `ID ${reserva.viajero_id}`,
+    viajero_id: reserva.viajero_id,
+    viajero: reserva.viajero_nombre,
+    tipo_identificacion: reserva.viajero_tipo_identificacion || 'CC',
     identificacion: reserva.viajero_identificacion || null,
     telefono: reserva.viajero_telefono || null,
     cupos: reserva.cupos,
@@ -133,7 +144,10 @@ async function cargarExperiencias() {
     const data = await pedirJson(`${API_URL}/api/experiencias${query}`);
 
     experiencias.value = data.experiencias || [];
-    if (experiencias.value.length > 0) {
+    if (
+      experiencias.value.length > 0 &&
+      !experiencias.value.some((e) => e.id === reservaForm.value.experiencia_id)
+    ) {
       reservaForm.value.experiencia_id = experiencias.value[0].id;
     }
   } catch (err) {
@@ -252,7 +266,6 @@ onMounted(async () => {
       </div>
     </header>
 
-    <!-- VISTA DEDICADA EN OTRA VENTANA: VALIDACIÓN DE RESERVA E INGRESO -->
     <section v-if="esVistaValidacion" class="reserva-box validacion-box">
       <h2>Validación de reserva e ingreso</h2>
       <div class="validacion-controls">
@@ -272,10 +285,10 @@ onMounted(async () => {
         <div>
           <p><strong>Código:</strong> <code>{{ reservaConsultada.codigo_validacion }}</code></p>
           <p><strong>Estado:</strong> {{ reservaConsultada.estado }}</p>
-          <p><strong>Experiencia:</strong> {{ reservaConsultada.experiencia_titulo }}</p>
-          <p><strong>Viajero:</strong> {{ reservaConsultada.viajero_nombre }}</p>
+          <p><strong>ID Experiencia:</strong> {{ reservaConsultada.experiencia_id }} — {{ reservaConsultada.experiencia_titulo }}</p>
+          <p><strong>ID Viajero:</strong> {{ reservaConsultada.viajero_id }} — {{ reservaConsultada.viajero_nombre }}</p>
           <p v-if="reservaConsultada.viajero_identificacion">
-            <strong>Identificación:</strong> {{ reservaConsultada.viajero_identificacion }}
+            <strong>Identificación:</strong> {{ reservaConsultada.viajero_tipo_identificacion || 'CC' }} {{ reservaConsultada.viajero_identificacion }}
           </p>
           <p v-if="reservaConsultada.viajero_telefono">
             <strong>Teléfono:</strong> {{ reservaConsultada.viajero_telefono }}
@@ -289,7 +302,6 @@ onMounted(async () => {
       </div>
     </section>
 
-    <!-- VISTA PRINCIPAL: EXPLORAR, AGREGAR ALOJAMIENTO Y CREAR RESERVA -->
     <template v-else>
       <section v-if="mostrarFormExperiencia" class="reserva-box">
         <h2>Agregar alojamiento o experiencia sostenible</h2>
@@ -318,11 +330,11 @@ onMounted(async () => {
           </label>
           <label>
             Latitud
-            <input v-model="nuevaExp.lat" type="text" required />
+            <input v-model="nuevaExp.latitud" type="text" required />
           </label>
           <label>
             Longitud
-            <input v-model="nuevaExp.lng" type="text" required />
+            <input v-model="nuevaExp.longitud" type="text" required />
           </label>
           <label>
             Precio (COP)
@@ -372,7 +384,12 @@ onMounted(async () => {
       <p v-if="errorMsg" class="error">{{ errorMsg }}</p>
 
       <section class="grid">
-        <article v-for="exp in experiencias" :key="exp.id" class="card">
+        <article
+          v-for="exp in experiencias"
+          :key="exp.id"
+          class="card"
+          :class="{ 'card-seleccionada': reservaForm.experiencia_id === exp.id }"
+        >
           <span class="badge">{{ exp.categoria }}</span>
           <h2>{{ exp.titulo }}</h2>
           <p>{{ exp.descripcion }}</p>
@@ -382,20 +399,42 @@ onMounted(async () => {
             <strong>Distancia:</strong> {{ (exp.distancia_metros / 1000).toFixed(2) }} km
           </p>
           <p class="precio">${{ Number(exp.precio_cop).toLocaleString('es-CO') }} COP</p>
-          <button @click="reservaForm.experiencia_id = exp.id">Seleccionar para reservar</button>
+          <button @click="reservaForm.experiencia_id = exp.id">
+            {{ reservaForm.experiencia_id === exp.id ? '✓ Seleccionado para reservar' : 'Seleccionar para reservar' }}
+          </button>
         </article>
       </section>
 
       <section class="reserva-box">
         <h2>Crear reserva</h2>
+        <p v-if="experienciaSeleccionada" class="seleccion-actual">
+          Experiencia elegida: <strong>{{ experienciaSeleccionada.titulo }}</strong> ({{ experienciaSeleccionada.municipio || 'Colombia' }})
+        </p>
+
         <form @submit.prevent="enviarReserva" class="reserva-form">
           <label>
-            ID Experiencia
-            <input v-model.number="reservaForm.experiencia_id" type="number" min="1" required />
+            Nombres
+            <input v-model="reservaForm.nombres" type="text" placeholder="Ej. Laura Camila" required />
           </label>
           <label>
-            ID Viajero
-            <input v-model.number="reservaForm.viajero_id" type="number" min="1" required />
+            Apellidos
+            <input v-model="reservaForm.apellidos" type="text" placeholder="Ej. Gómez Ríos" required />
+          </label>
+          <label>
+            Teléfono
+            <input v-model="reservaForm.telefono" type="tel" placeholder="Ej. 3001234567" required />
+          </label>
+          <label>
+            Tipo de identificación
+            <select v-model="reservaForm.tipo_identificacion" required>
+              <option value="CC">CC (Cédula de Ciudadanía)</option>
+              <option value="TI">TI (Tarjeta de Identidad)</option>
+              <option value="NIT">NIT</option>
+            </select>
+          </label>
+          <label>
+            Número de identificación
+            <input v-model="reservaForm.identificacion" type="text" placeholder="Ej. 1020304050" required />
           </label>
           <label>
             Fecha inicio
@@ -417,9 +456,12 @@ onMounted(async () => {
           <div>
             <p><strong>¡Reserva confirmada!</strong></p>
             <p>Código de validación: <code>{{ reservaCreada.codigo_validacion }}</code></p>
-            <p>Estado: <strong>{{ reservaCreada.estado }}</strong></p>
-            <p>Cupos: {{ reservaCreada.cupos }}</p>
-            <p>Total: ${{ Number(reservaCreada.total_cop).toLocaleString('es-CO') }} COP</p>
+            <p><strong>ID Experiencia:</strong> {{ reservaCreada.experiencia_id }} — {{ reservaCreada.experiencia_titulo }}</p>
+            <p><strong>ID Viajero:</strong> {{ reservaCreada.viajero_id }} — {{ reservaCreada.viajero_nombre }}</p>
+            <p><strong>Identificación:</strong> {{ reservaCreada.viajero_tipo_identificacion }} {{ reservaCreada.viajero_identificacion }}</p>
+            <p><strong>Teléfono:</strong> {{ reservaCreada.viajero_telefono }}</p>
+            <p><strong>Estado:</strong> {{ reservaCreada.estado }} | <strong>Cupos:</strong> {{ reservaCreada.cupos }}</p>
+            <p><strong>Total:</strong> ${{ Number(reservaCreada.total_cop).toLocaleString('es-CO') }} COP</p>
             <button
               type="button"
               class="btn-secundario"
@@ -446,10 +488,12 @@ onMounted(async () => {
 .filtros { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; margin-bottom: 1.5rem; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1rem; margin-bottom: 2rem; }
 .card { border: 1px solid #d1d5db; border-radius: 10px; padding: 1rem; background: #fff; color: #111827; }
+.card-seleccionada { border: 2px solid #15803d; box-shadow: 0 0 0 2px #dcfce7; }
 .badge { display: inline-block; background: #dcfce7; color: #166534; padding: 0.2rem 0.6rem; border-radius: 999px; font-size: 0.8rem; }
 .precio { font-weight: 700; color: #15803d; }
+.seleccion-actual { margin-bottom: 0.85rem; color: #166534; }
 .reserva-box { border: 1px solid #d1d5db; border-radius: 10px; padding: 1.25rem; background: #f9fafb; color: #111827; margin-bottom: 1.5rem; }
-.reserva-form, .exp-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0.75rem; align-items: end; }
+.reserva-form, .exp-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.75rem; align-items: end; }
 .span-2 { grid-column: span 2; }
 .reserva-form label, .exp-form label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.9rem; }
 .validacion-controls { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; }

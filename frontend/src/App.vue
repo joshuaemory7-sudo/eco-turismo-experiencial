@@ -1,7 +1,8 @@
 ﻿<script setup>
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, watch, nextTick } from 'vue';
+import QRCode from 'qrcode';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
+const API_URL = (import.meta.env.VITE_API_URL || 'http://localhost:3000').trim().replace(/\/+$/, '');
 
 const experiencias = ref([]);
 const cargando = ref(false);
@@ -27,6 +28,66 @@ const reservaConsultada = ref(null);
 const validacionMsg = ref('');
 const validacionError = ref('');
 
+const qrCreadaCanvas = ref(null);
+const qrConsultadaCanvas = ref(null);
+
+function construirPayloadQr(reserva) {
+  return JSON.stringify({
+    proyecto: 'Eco Turismo Experiencial',
+    codigo: reserva.codigo_validacion,
+    estado: reserva.estado,
+    experiencia: reserva.experiencia_titulo || `ID ${reserva.experiencia_id}`,
+    viajero: reserva.viajero_nombre || `ID ${reserva.viajero_id}`,
+    identificacion: reserva.viajero_identificacion || null,
+    telefono: reserva.viajero_telefono || null,
+    cupos: reserva.cupos,
+    fecha_inicio: reserva.fecha_inicio,
+    fecha_fin: reserva.fecha_fin,
+  });
+}
+
+async function dibujarQr(canvasEl, reserva) {
+  if (!canvasEl || !reserva || !reserva.codigo_validacion) return;
+  try {
+    await QRCode.toCanvas(canvasEl, construirPayloadQr(reserva), {
+      width: 190,
+      margin: 2,
+      errorCorrectionLevel: 'M',
+    });
+  } catch (err) {
+    console.error('Error generando QR:', err);
+  }
+}
+
+watch(reservaCreada, async (nueva) => {
+  if (nueva) {
+    await nextTick();
+    await dibujarQr(qrCreadaCanvas.value, nueva);
+  }
+});
+
+watch(reservaConsultada, async (consultada) => {
+  if (consultada) {
+    await nextTick();
+    await dibujarQr(qrConsultadaCanvas.value, consultada);
+  }
+});
+
+async function pedirJson(url, options = {}) {
+  const res = await fetch(url, options);
+  const texto = await res.text();
+  let data = null;
+  try {
+    data = JSON.parse(texto);
+  } catch {
+    throw new Error(`[${res.status}] ${url} devolvió no-JSON: ${texto.slice(0, 90)}`);
+  }
+  if (!res.ok) {
+    throw new Error(data.error || `Error ${res.status} en ${url}`);
+  }
+  return data;
+}
+
 async function cargarExperiencias() {
   cargando.value = true;
   errorMsg.value = '';
@@ -40,9 +101,7 @@ async function cargarExperiencias() {
     }
 
     const query = params.toString() ? `?${params.toString()}` : '';
-    const res = await fetch(`${API_URL}/api/experiencias${query}`);
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Error al cargar experiencias');
+    const data = await pedirJson(`${API_URL}/api/experiencias${query}`);
 
     experiencias.value = data.experiencias || [];
     if (experiencias.value.length > 0) {
@@ -59,13 +118,11 @@ async function enviarReserva() {
   reservaError.value = '';
   reservaCreada.value = null;
   try {
-    const res = await fetch(`${API_URL}/api/reservas`, {
+    const data = await pedirJson(`${API_URL}/api/reservas`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(reservaForm.value),
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'No se pudo crear la reserva');
     reservaCreada.value = data.reserva;
     codigoConsulta.value = data.reserva.codigo_validacion;
   } catch (err) {
@@ -83,9 +140,7 @@ async function consultarCodigo() {
     return;
   }
   try {
-    const res = await fetch(`${API_URL}/api/reservas/codigo/${encodeURIComponent(codigo)}`);
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'No se encontró la reserva');
+    const data = await pedirJson(`${API_URL}/api/reservas/codigo/${encodeURIComponent(codigo)}`);
     reservaConsultada.value = data.reserva;
   } catch (err) {
     validacionError.value = err.message;
@@ -101,11 +156,9 @@ async function confirmarIngreso() {
     return;
   }
   try {
-    const res = await fetch(`${API_URL}/api/reservas/codigo/${encodeURIComponent(codigo)}/validar`, {
+    const data = await pedirJson(`${API_URL}/api/reservas/codigo/${encodeURIComponent(codigo)}/validar`, {
       method: 'PATCH',
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'No se pudo validar el ingreso');
     validacionMsg.value = data.mensaje || 'Ingreso validado.';
     await consultarCodigo();
   } catch (err) {
@@ -190,10 +243,18 @@ onMounted(cargarExperiencias);
       </form>
 
       <p v-if="reservaError" class="error">{{ reservaError }}</p>
-      <div v-if="reservaCreada" class="confirmacion">
-        <p><strong>¡Reserva confirmada!</strong></p>
-        <p>Código de validación: <code>{{ reservaCreada.codigo_validacion }}</code></p>
-        <p>Total: ${{ Number(reservaCreada.total_cop).toLocaleString('es-CO') }} COP</p>
+      <div v-if="reservaCreada" class="confirmacion confirmacion-grid">
+        <div>
+          <p><strong>¡Reserva confirmada!</strong></p>
+          <p>Código de validación: <code>{{ reservaCreada.codigo_validacion }}</code></p>
+          <p>Estado: <strong>{{ reservaCreada.estado }}</strong></p>
+          <p>Cupos: {{ reservaCreada.cupos }}</p>
+          <p>Total: ${{ Number(reservaCreada.total_cop).toLocaleString('es-CO') }} COP</p>
+        </div>
+        <div class="qr-box">
+          <canvas ref="qrCreadaCanvas"></canvas>
+          <span class="qr-caption">QR de ingreso {{ reservaCreada.codigo_validacion }}</span>
+        </div>
       </div>
     </section>
 
@@ -212,18 +273,24 @@ onMounted(cargarExperiencias);
       <p v-if="validacionError" class="error">{{ validacionError }}</p>
       <p v-if="validacionMsg" class="exito">{{ validacionMsg }}</p>
 
-      <div v-if="reservaConsultada" class="detalle-reserva">
-        <p><strong>Código:</strong> <code>{{ reservaConsultada.codigo_validacion }}</code></p>
-        <p><strong>Estado:</strong> {{ reservaConsultada.estado }}</p>
-        <p><strong>Experiencia:</strong> {{ reservaConsultada.experiencia_titulo }}</p>
-        <p><strong>Viajero:</strong> {{ reservaConsultada.viajero_nombre }}</p>
-        <p v-if="reservaConsultada.viajero_identificacion">
-          <strong>Identificación:</strong> {{ reservaConsultada.viajero_identificacion }}
-        </p>
-        <p v-if="reservaConsultada.viajero_telefono">
-          <strong>Teléfono:</strong> {{ reservaConsultada.viajero_telefono }}
-        </p>
-        <p><strong>Cupos:</strong> {{ reservaConsultada.cupos }}</p>
+      <div v-if="reservaConsultada" class="detalle-reserva detalle-grid">
+        <div>
+          <p><strong>Código:</strong> <code>{{ reservaConsultada.codigo_validacion }}</code></p>
+          <p><strong>Estado:</strong> {{ reservaConsultada.estado }}</p>
+          <p><strong>Experiencia:</strong> {{ reservaConsultada.experiencia_titulo }}</p>
+          <p><strong>Viajero:</strong> {{ reservaConsultada.viajero_nombre }}</p>
+          <p v-if="reservaConsultada.viajero_identificacion">
+            <strong>Identificación:</strong> {{ reservaConsultada.viajero_identificacion }}
+          </p>
+          <p v-if="reservaConsultada.viajero_telefono">
+            <strong>Teléfono:</strong> {{ reservaConsultada.viajero_telefono }}
+          </p>
+          <p><strong>Cupos:</strong> {{ reservaConsultada.cupos }}</p>
+        </div>
+        <div class="qr-box">
+          <canvas ref="qrConsultadaCanvas"></canvas>
+          <span class="qr-caption">QR {{ reservaConsultada.codigo_validacion }}</span>
+        </div>
       </div>
     </section>
   </main>
@@ -243,6 +310,9 @@ onMounted(cargarExperiencias);
 .validacion-controls { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; }
 .detalle-reserva { margin-top: 1rem; padding: 0.85rem; border-radius: 8px; background: #fff; border: 1px solid #d1d5db; }
 .confirmacion { margin-top: 1rem; padding: 0.75rem; border-radius: 8px; background: #ecfdf5; border: 1px solid #86efac; }
+.confirmacion-grid, .detalle-grid { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 1rem; }
+.qr-box { display: flex; flex-direction: column; align-items: center; gap: 0.35rem; background: #fff; padding: 0.6rem; border-radius: 8px; border: 1px solid #d1d5db; }
+.qr-caption { font-size: 0.8rem; color: #374151; font-weight: 600; }
 .exito { color: #15803d; font-weight: 600; margin-top: 0.75rem; }
 .error { color: #b91c1c; font-weight: 600; margin-top: 0.75rem; }
 button { background: #15803d; color: #fff; border: none; border-radius: 6px; padding: 0.5rem 0.9rem; cursor: pointer; }

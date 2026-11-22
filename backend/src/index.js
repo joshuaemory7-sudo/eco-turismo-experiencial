@@ -56,7 +56,12 @@ app.listen(PORT, async () => {
   console.log(`Servidor backend escuchando en http://localhost:${PORT}`);
   try {
     await probarConexionDB();
-  } catch (error) {
-    console.error('Error al conectar con Supabase:', error.message);
+  } catch {
+    await new Promise((r) => setTimeout(r, 1500));
+    try {
+      await probarConexionDB();
+    } catch (error) {
+      console.error('Error al conectar con Supabase:', error.message);
+    }
   }
 });

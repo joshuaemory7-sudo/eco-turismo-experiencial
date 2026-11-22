@@ -1,28 +1,35 @@
 ﻿const { Pool } = require('pg');
-require('dotenv').config();
 
-const usarSSL = process.env.DB_SSL === 'true';
-
-let connectionString = process.env.DATABASE_URL || '';
-if (usarSSL && connectionString.includes('sslmode=')) {
-  connectionString = connectionString.replace(/([?&])sslmode=[^&]*(&?)/, (match, p1, p2) => {
-    if (p1 === '?' && p2) return '?';
-    if (p1 === '?' && !p2) return '';
-    return p2 ? p1 : '';
-  });
+function construirConnectionString(rawUrl) {
+  if (!rawUrl) return rawUrl;
+  try {
+    const parsed = new URL(rawUrl);
+    parsed.searchParams.delete('sslmode');
+    parsed.searchParams.delete('uselibpqcompat');
+    return parsed.toString();
+  } catch {
+    return rawUrl.replace(/([?&])(sslmode|uselibpqcompat)=[^&]+(&|$)/gi, (m, p1, _k, p3) => {
+      if (p1 === '?' && p3 === '&') return '?';
+      if (p3 === '&') return p1;
+      return '';
+    });
+  }
 }
 
+const usarSsl =
+  process.env.DB_SSL === 'true' ||
+  (process.env.DATABASE_URL && process.env.DATABASE_URL.includes('supabase'));
+
 const pool = new Pool({
-  connectionString,
-  ssl: usarSSL ? { rejectUnauthorized: false } : false,
+  connectionString: construirConnectionString(process.env.DATABASE_URL),
+  ssl: usarSsl ? { rejectUnauthorized: false } : false,
 });
 
 async function probarConexionDB() {
   const client = await pool.connect();
   try {
-    await client.query('SELECT 1');
-    await client.query('CREATE EXTENSION IF NOT EXISTS postgis');
-    console.log('Conectado a PostgreSQL + PostGIS correctamente.');
+    const res = await client.query('SELECT NOW() AS ahora');
+    console.log('Conectado a Supabase PostgreSQL:', res.rows[0].ahora);
   } finally {
     client.release();
   }

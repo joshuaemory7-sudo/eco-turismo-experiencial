@@ -1,70 +1,135 @@
 ﻿const crypto = require('crypto');
 const { pool } = require('../../config/db');
 
-async function listarReservas(req, res) {
-  try {
-    const result = await pool.query(`
-      SELECT
-        r.id,
-        r.experiencia_id,
-        e.titulo AS experiencia_titulo,
-        r.viajero_id,
-        u.nombre AS viajero_nombre,
-        u.identificacion AS viajero_identificacion,
-        u.telefono AS viajero_telefono,
-        r.fecha_inicio,
-        r.fecha_fin,
-        r.cupos,
-        r.total_cop,
-        r.estado,
-        r.codigo_validacion
-      FROM reservas r
-      JOIN experiencias e ON e.id = r.experiencia_id
-      JOIN usuarios u ON u.id = r.viajero_id
-      ORDER BY r.creado_en DESC
-    `);
-    res.json({ total: result.rowCount, reservas: result.rows });
-  } catch (error) {
-    res.status(500).json({ error: 'Error al listar reservas', detalle: error.message });
+function generarCodigoValidacion() {
+  return `ECO-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+}
+
+async function obtenerOCrearViajero(client, payload) {
+  const {
+    viajero_id,
+    nombres,
+    apellidos,
+    telefono,
+    tipo_identificacion,
+    identificacion,
+  } = payload;
+
+  if (viajero_id && !nombres && !identificacion) {
+    const resExistente = await client.query(
+      'SELECT id, nombre, email, tipo_identificacion, identificacion, telefono FROM usuarios WHERE id = $1',
+      [viajero_id]
+    );
+    return resExistente.rows[0] || null;
   }
+
+  const nombresLimpios = String(nombres || '').trim();
+  const apellidosLimpios = String(apellidos || '').trim();
+  const telefonoLimpio = String(telefono || '').trim();
+  const tipoDoc = String(tipo_identificacion || 'CC').trim().toUpperCase();
+  const numDoc = String(identificacion || '').trim();
+
+  if (!nombresLimpios || !apellidosLimpios || !telefonoLimpio || !numDoc) {
+    throw Object.assign(
+      new Error('Nombres, apellidos, teléfono e identificación son obligatorios.'),
+      { statusCode: 400 }
+    );
+  }
+
+  if (!['CC', 'TI', 'NIT'].includes(tipoDoc)) {
+    throw Object.assign(
+      new Error('El tipo de identificación debe ser CC, TI o NIT.'),
+      { statusCode: 400 }
+    );
+  }
+
+  const nombreCompleto = `${nombresLimpios} ${apellidosLimpios}`;
+  const docFormateado = `${tipoDoc} ${numDoc}`;
+
+  const buscado = await client.query(
+    `SELECT id, nombre, email, tipo_identificacion, identificacion, telefono
+     FROM usuarios
+     WHERE identificacion = $1 OR identificacion = $2
+     LIMIT 1`,
+    [numDoc, docFormateado]
+  );
+
+  if (buscado.rows.length > 0) {
+    const actual = buscado.rows[0];
+    const actualizado = await client.query(
+      `UPDATE usuarios
+       SET nombre = $1,
+           tipo_identificacion = $2,
+           identificacion = $3,
+           telefono = $4
+       WHERE id = $5
+       RETURNING id, nombre, email, tipo_identificacion, identificacion, telefono`,
+      [nombreCompleto, tipoDoc, numDoc, telefonoLimpio, actual.id]
+    );
+    return actualizado.rows[0];
+  }
+
+  const emailGenerado = `viajero.${tipoDoc.toLowerCase()}.${numDoc.replace(/[^a-zA-Z0-9]/g, '')}@ecoturismo.local`;
+  const insertado = await client.query(
+    `INSERT INTO usuarios (nombre, email, password_hash, rol, tipo_identificacion, identificacion, telefono)
+     VALUES ($1, $2, $3, 'viajero', $4, $5, $6)
+     RETURNING id, nombre, email, tipo_identificacion, identificacion, telefono`,
+    [nombreCompleto, emailGenerado, 'registro_rapido_reserva', tipoDoc, numDoc, telefonoLimpio]
+  );
+  return insertado.rows[0];
 }
 
 async function crearReserva(req, res) {
+  const {
+    experiencia_id,
+    fecha_inicio,
+    fecha_fin,
+    cupos,
+  } = req.body;
+
+  if (!experiencia_id || !fecha_inicio || !fecha_fin || !cupos) {
+    return res.status(400).json({
+      error: 'experiencia_id, fecha_inicio, fecha_fin y cupos son obligatorios.',
+    });
+  }
+
+  if (Number(cupos) <= 0) {
+    return res.status(400).json({ error: 'Los cupos deben ser mayores a 0.' });
+  }
+
+  const client = await pool.connect();
   try {
-    const { experiencia_id, viajero_id, fecha_inicio, fecha_fin, cupos } = req.body;
+    await client.query('BEGIN');
 
-    if (!experiencia_id || !viajero_id || !fecha_inicio || !fecha_fin || !cupos) {
-      return res.status(400).json({ error: 'Faltan datos obligatorios de la reserva.' });
-    }
-
-    const cuposNum = Number(cupos);
-    if (cuposNum <= 0) {
-      return res.status(400).json({ error: 'La cantidad de cupos debe ser mayor a 0.' });
-    }
-
-    const expRes = await pool.query(
-      'SELECT id, precio_cop, cupo_maximo, activa FROM experiencias WHERE id = $1',
-      [Number(experiencia_id)]
+    const expResult = await client.query(
+      'SELECT id, titulo, precio_cop, cupo_maximo, activo FROM experiencias WHERE id = $1',
+      [experiencia_id]
     );
 
-    if (expRes.rowCount === 0 || !expRes.rows[0].activa) {
-      return res.status(404).json({ error: 'La experiencia no existe o no está activa.' });
+    if (expResult.rows.length === 0 || !expResult.rows[0].activo) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Experiencia no encontrada o inactiva.' });
     }
 
-    const experiencia = expRes.rows[0];
-    if (cuposNum > experiencia.cupo_maximo) {
-      return res.status(400).json({ error: `Supera el cupo máximo permitido (${experiencia.cupo_maximo}).` });
+    const experiencia = expResult.rows[0];
+    if (Number(cupos) > Number(experiencia.cupo_maximo)) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        error: `Los cupos solicitados (${cupos}) superan el cupo máximo (${experiencia.cupo_maximo}).`,
+      });
     }
 
-    const inicio = new Date(fecha_inicio);
-    const fin = new Date(fecha_fin);
-    const diffDias = Math.max(1, Math.round((fin - inicio) / (1000 * 60 * 60 * 24)) || 1);
-    const totalCop = Number(experiencia.precio_cop) * cuposNum * diffDias;
-    const codigoValidacion = `ECO-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+    const viajero = await obtenerOCrearViajero(client, req.body);
+    if (!viajero) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Viajero no encontrado.' });
+    }
 
-    const insertRes = await pool.query(
-      `
-      INSERT INTO reservas (
+    const totalCop = Number(experiencia.precio_cop) * Number(cupos);
+    const codigoValidacion = generarCodigoValidacion();
+
+    const insertResult = await client.query(
+      `INSERT INTO reservas (
         experiencia_id,
         viajero_id,
         fecha_inicio,
@@ -75,101 +140,112 @@ async function crearReserva(req, res) {
         codigo_validacion
       )
       VALUES ($1, $2, $3, $4, $5, $6, 'confirmada', $7)
-      RETURNING *
-      `,
+      RETURNING *`,
       [
-        Number(experiencia_id),
-        Number(viajero_id),
+        experiencia_id,
+        viajero.id,
         fecha_inicio,
         fecha_fin,
-        cuposNum,
+        cupos,
         totalCop,
         codigoValidacion,
       ]
     );
 
-    res.status(201).json({ reserva: insertRes.rows[0] });
+    await client.query('COMMIT');
+
+    const reserva = insertResult.rows[0];
+    return res.status(201).json({
+      reserva: {
+        ...reserva,
+        experiencia_titulo: experiencia.titulo,
+        viajero_nombre: viajero.nombre,
+        viajero_tipo_identificacion: viajero.tipo_identificacion,
+        viajero_identificacion: viajero.identificacion,
+        viajero_telefono: viajero.telefono,
+      },
+    });
   } catch (error) {
-    res.status(500).json({ error: 'Error al crear reserva', detalle: error.message });
+    await client.query('ROLLBACK');
+    const status = error.statusCode || 500;
+    return res.status(status).json({ error: error.message });
+  } finally {
+    client.release();
   }
 }
 
-async function obtenerReservaPorCodigo(req, res) {
+async function consultarReservaPorCodigo(req, res) {
+  const { codigo } = req.params;
   try {
-    const { codigo } = req.params;
     const result = await pool.query(
-      `
-      SELECT
-        r.id,
-        r.fecha_inicio,
-        r.fecha_fin,
-        r.cupos,
-        r.total_cop,
-        r.estado,
-        r.codigo_validacion,
+      `SELECT
+        r.*,
         e.titulo AS experiencia_titulo,
+        e.municipio AS experiencia_municipio,
         u.nombre AS viajero_nombre,
+        u.tipo_identificacion AS viajero_tipo_identificacion,
         u.identificacion AS viajero_identificacion,
         u.telefono AS viajero_telefono
       FROM reservas r
       JOIN experiencias e ON e.id = r.experiencia_id
       JOIN usuarios u ON u.id = r.viajero_id
-      WHERE r.codigo_validacion = $1
-      `,
-      [codigo.trim().toUpperCase()]
+      WHERE UPPER(r.codigo_validacion) = UPPER($1)`,
+      [codigo.trim()]
     );
 
-    if (result.rowCount === 0) {
-      return res.status(404).json({ error: 'Código de reserva no encontrado.' });
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Reserva no encontrada con ese código.' });
     }
 
-    res.json({ reserva: result.rows[0] });
+    return res.json({ reserva: result.rows[0] });
   } catch (error) {
-    res.status(500).json({ error: 'Error al consultar la reserva', detalle: error.message });
+    return res.status(500).json({ error: error.message });
   }
 }
 
 async function validarIngresoReserva(req, res) {
+  const { codigo } = req.params;
   try {
-    const { codigo } = req.params;
-    const codigoLimpio = codigo.trim().toUpperCase();
-
-    const actualRes = await pool.query(
-      'SELECT id, estado FROM reservas WHERE codigo_validacion = $1',
-      [codigoLimpio]
+    const actual = await pool.query(
+      'SELECT id, estado, codigo_validacion FROM reservas WHERE UPPER(codigo_validacion) = UPPER($1)',
+      [codigo.trim()]
     );
 
-    if (actualRes.rowCount === 0) {
-      return res.status(404).json({ error: 'Código de reserva no encontrado.' });
+    if (actual.rows.length === 0) {
+      return res.status(404).json({ error: 'Reserva no encontrada con ese código.' });
     }
 
-    const actual = actualRes.rows[0];
-    if (actual.estado === 'cancelada') {
-      return res.status(400).json({ error: 'La reserva está cancelada y no puede ingresar.' });
+    const reserva = actual.rows[0];
+    if (reserva.estado === 'cancelada') {
+      return res.status(400).json({ error: 'No se puede validar ingreso: la reserva está cancelada.' });
     }
 
-    const updatedRes = await pool.query(
-      `
-      UPDATE reservas
-      SET estado = 'ingresada'
-      WHERE codigo_validacion = $1
-      RETURNING id, experiencia_id, viajero_id, fecha_inicio, fecha_fin, cupos, total_cop, estado, codigo_validacion
-      `,
-      [codigoLimpio]
+    if (reserva.estado === 'ingresada') {
+      return res.json({
+        mensaje: 'La reserva ya tenía el ingreso registrado previamente.',
+        reserva,
+      });
+    }
+
+    const updated = await pool.query(
+      `UPDATE reservas
+       SET estado = 'ingresada'
+       WHERE id = $1
+       RETURNING *`,
+      [reserva.id]
     );
 
-    res.json({
+    return res.json({
       mensaje: 'Ingreso validado correctamente.',
-      reserva: updatedRes.rows[0],
+      reserva: updated.rows[0],
     });
   } catch (error) {
-    res.status(500).json({ error: 'Error al validar ingreso de reserva', detalle: error.message });
+    return res.status(500).json({ error: error.message });
   }
 }
 
 module.exports = {
-  listarReservas,
   crearReserva,
-  obtenerReservaPorCodigo,
+  consultarReservaPorCodigo,
   validarIngresoReserva,
 };

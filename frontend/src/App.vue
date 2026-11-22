@@ -1,8 +1,11 @@
 ﻿<script setup>
-import { ref, onMounted, watch, nextTick } from 'vue';
+import { ref, onMounted, watch, nextTick, computed } from 'vue';
 import QRCode from 'qrcode';
 
 const API_URL = (import.meta.env.VITE_API_URL || 'http://localhost:3000').trim().replace(/\/+$/, '');
+
+const urlParams = new URLSearchParams(window.location.search);
+const esVistaValidacion = computed(() => urlParams.get('vista') === 'validacion');
 
 const experiencias = ref([]);
 const cargando = ref(false);
@@ -12,6 +15,22 @@ const usarCercania = ref(false);
 const lat = ref('4.7110');
 const lng = ref('-74.0721');
 const radioKm = ref('20');
+
+const mostrarFormExperiencia = ref(false);
+const nuevaExp = ref({
+  anfitrion_id: 1,
+  titulo: '',
+  descripcion: '',
+  categoria: 'alojamiento_eco',
+  practicas_sostenibles: '',
+  municipio: '',
+  lat: '4.7110',
+  lng: '-74.0721',
+  precio_cop: 150000,
+  cupo_maximo: 4,
+});
+const expMsg = ref('');
+const expError = ref('');
 
 const reservaForm = ref({
   experiencia_id: 1,
@@ -23,13 +42,23 @@ const reservaForm = ref({
 const reservaCreada = ref(null);
 const reservaError = ref('');
 
-const codigoConsulta = ref('');
+const codigoConsulta = ref(urlParams.get('codigo') || '');
 const reservaConsultada = ref(null);
 const validacionMsg = ref('');
 const validacionError = ref('');
 
 const qrCreadaCanvas = ref(null);
 const qrConsultadaCanvas = ref(null);
+
+function urlValidacionVentana(codigo = '') {
+  const base = `${window.location.origin}${window.location.pathname}?vista=validacion`;
+  return codigo.trim() ? `${base}&codigo=${encodeURIComponent(codigo.trim())}` : base;
+}
+
+function abrirValidacionEnOtraVentana(codigo = '') {
+  const destino = urlValidacionVentana(codigo || codigoConsulta.value);
+  window.open(destino, '_blank', 'noopener,noreferrer');
+}
 
 function construirPayloadQr(reserva) {
   return JSON.stringify({
@@ -114,6 +143,25 @@ async function cargarExperiencias() {
   }
 }
 
+async function crearExperiencia() {
+  expError.value = '';
+  expMsg.value = '';
+  try {
+    const data = await pedirJson(`${API_URL}/api/experiencias`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(nuevaExp.value),
+    });
+    expMsg.value = `Experiencia creada: ${data.experiencia?.titulo || nuevaExp.value.titulo}`;
+    nuevaExp.value.titulo = '';
+    nuevaExp.value.descripcion = '';
+    nuevaExp.value.practicas_sostenibles = '';
+    await cargarExperiencias();
+  } catch (err) {
+    expError.value = err.message;
+  }
+}
+
 async function enviarReserva() {
   reservaError.value = '';
   reservaCreada.value = null;
@@ -166,99 +214,46 @@ async function confirmarIngreso() {
   }
 }
 
-onMounted(cargarExperiencias);
+onMounted(async () => {
+  if (esVistaValidacion.value) {
+    if (codigoConsulta.value.trim()) {
+      await consultarCodigo();
+    }
+  } else {
+    await cargarExperiencias();
+  }
+});
 </script>
 
 <template>
   <main class="container">
-    <header class="header">
-      <h1>Eco Turismo Experiencial</h1>
-      <p>Marketplace de alojamientos y experiencias sostenibles con geolocalización PostGIS</p>
+    <header class="header top-bar">
+      <div>
+        <h1>Eco Turismo Experiencial</h1>
+        <p v-if="!esVistaValidacion">Marketplace de alojamientos y experiencias sostenibles con geolocalización PostGIS</p>
+        <p v-else>Módulo independiente de validación de reservas e ingreso</p>
+      </div>
+      <div class="header-actions">
+        <button
+          v-if="!esVistaValidacion"
+          type="button"
+          class="btn-secundario"
+          @click="abrirValidacionEnOtraVentana(codigoConsulta)"
+        >
+          Abrir validación en otra ventana
+        </button>
+        <button
+          v-if="!esVistaValidacion"
+          type="button"
+          @click="mostrarFormExperiencia = !mostrarFormExperiencia"
+        >
+          {{ mostrarFormExperiencia ? 'Ocultar formulario' : '+ Agregar alojamiento / experiencia' }}
+        </button>
+      </div>
     </header>
 
-    <section class="filtros">
-      <select v-model="categoria">
-        <option value="">Todas las categorías</option>
-        <option value="alojamiento_eco">Alojamiento eco</option>
-        <option value="senderismo">Senderismo</option>
-        <option value="avistamiento">Avistamiento</option>
-        <option value="comunitaria">Comunitaria</option>
-        <option value="taller_sostenible">Taller sostenible</option>
-      </select>
-
-      <label class="checkbox">
-        <input type="checkbox" v-model="usarCercania" />
-        Buscar por cercanía
-      </label>
-
-      <input v-if="usarCercania" v-model="lat" type="text" placeholder="Latitud" />
-      <input v-if="usarCercania" v-model="lng" type="text" placeholder="Longitud" />
-      <input v-if="usarCercania" v-model="radioKm" type="number" min="1" placeholder="Radio (km)" />
-
-      <button @click="cargarExperiencias">Buscar</button>
-    </section>
-
-    <p v-if="cargando">Cargando experiencias...</p>
-    <p v-if="errorMsg" class="error">{{ errorMsg }}</p>
-
-    <section class="grid">
-      <article v-for="exp in experiencias" :key="exp.id" class="card">
-        <span class="badge">{{ exp.categoria }}</span>
-        <h2>{{ exp.titulo }}</h2>
-        <p>{{ exp.descripcion }}</p>
-        <p v-if="exp.practicas_sostenibles"><strong>Sostenibilidad:</strong> {{ exp.practicas_sostenibles }}</p>
-        <p><strong>Municipio:</strong> {{ exp.municipio || 'Sin especificar' }}</p>
-        <p v-if="exp.distancia_metros !== null && exp.distancia_metros !== undefined">
-          <strong>Distancia:</strong> {{ (exp.distancia_metros / 1000).toFixed(2) }} km
-        </p>
-        <p class="precio">${{ Number(exp.precio_cop).toLocaleString('es-CO') }} COP</p>
-        <button @click="reservaForm.experiencia_id = exp.id">Seleccionar para reservar</button>
-      </article>
-    </section>
-
-    <section class="reserva-box">
-      <h2>Crear reserva</h2>
-      <form @submit.prevent="enviarReserva" class="reserva-form">
-        <label>
-          ID Experiencia
-          <input v-model.number="reservaForm.experiencia_id" type="number" min="1" required />
-        </label>
-        <label>
-          ID Viajero
-          <input v-model.number="reservaForm.viajero_id" type="number" min="1" required />
-        </label>
-        <label>
-          Fecha inicio
-          <input v-model="reservaForm.fecha_inicio" type="date" required />
-        </label>
-        <label>
-          Fecha fin
-          <input v-model="reservaForm.fecha_fin" type="date" required />
-        </label>
-        <label>
-          Cupos
-          <input v-model.number="reservaForm.cupos" type="number" min="1" required />
-        </label>
-        <button type="submit">Confirmar reserva</button>
-      </form>
-
-      <p v-if="reservaError" class="error">{{ reservaError }}</p>
-      <div v-if="reservaCreada" class="confirmacion confirmacion-grid">
-        <div>
-          <p><strong>¡Reserva confirmada!</strong></p>
-          <p>Código de validación: <code>{{ reservaCreada.codigo_validacion }}</code></p>
-          <p>Estado: <strong>{{ reservaCreada.estado }}</strong></p>
-          <p>Cupos: {{ reservaCreada.cupos }}</p>
-          <p>Total: ${{ Number(reservaCreada.total_cop).toLocaleString('es-CO') }} COP</p>
-        </div>
-        <div class="qr-box">
-          <canvas ref="qrCreadaCanvas"></canvas>
-          <span class="qr-caption">QR de ingreso {{ reservaCreada.codigo_validacion }}</span>
-        </div>
-      </div>
-    </section>
-
-    <section class="reserva-box validacion-box">
+    <!-- VISTA DEDICADA EN OTRA VENTANA: VALIDACIÓN DE RESERVA E INGRESO -->
+    <section v-if="esVistaValidacion" class="reserva-box validacion-box">
       <h2>Validación de reserva e ingreso</h2>
       <div class="validacion-controls">
         <input
@@ -293,20 +288,170 @@ onMounted(cargarExperiencias);
         </div>
       </div>
     </section>
+
+    <!-- VISTA PRINCIPAL: EXPLORAR, AGREGAR ALOJAMIENTO Y CREAR RESERVA -->
+    <template v-else>
+      <section v-if="mostrarFormExperiencia" class="reserva-box">
+        <h2>Agregar alojamiento o experiencia sostenible</h2>
+        <form @submit.prevent="crearExperiencia" class="exp-form">
+          <label>
+            ID Anfitrión
+            <input v-model.number="nuevaExp.anfitrion_id" type="number" min="1" required />
+          </label>
+          <label>
+            Título
+            <input v-model="nuevaExp.titulo" type="text" placeholder="Ej. Eco-Cabaña El Mirador" required />
+          </label>
+          <label>
+            Categoría
+            <select v-model="nuevaExp.categoria">
+              <option value="alojamiento_eco">Alojamiento eco</option>
+              <option value="senderismo">Senderismo</option>
+              <option value="avistamiento">Avistamiento</option>
+              <option value="comunitaria">Comunitaria</option>
+              <option value="taller_sostenible">Taller sostenible</option>
+            </select>
+          </label>
+          <label>
+            Municipio
+            <input v-model="nuevaExp.municipio" type="text" placeholder="Ej. Guatavita" />
+          </label>
+          <label>
+            Latitud
+            <input v-model="nuevaExp.lat" type="text" required />
+          </label>
+          <label>
+            Longitud
+            <input v-model="nuevaExp.lng" type="text" required />
+          </label>
+          <label>
+            Precio (COP)
+            <input v-model.number="nuevaExp.precio_cop" type="number" min="1000" required />
+          </label>
+          <label>
+            Cupo máximo
+            <input v-model.number="nuevaExp.cupo_maximo" type="number" min="1" required />
+          </label>
+          <label class="span-2">
+            Prácticas sostenibles
+            <input v-model="nuevaExp.practicas_sostenibles" type="text" placeholder="Ej. Energía solar, agua lluvia, compostaje" />
+          </label>
+          <label class="span-2">
+            Descripción
+            <input v-model="nuevaExp.descripcion" type="text" placeholder="Describe el alojamiento o experiencia" required />
+          </label>
+          <button type="submit">Guardar experiencia</button>
+        </form>
+        <p v-if="expError" class="error">{{ expError }}</p>
+        <p v-if="expMsg" class="exito">{{ expMsg }}</p>
+      </section>
+
+      <section class="filtros">
+        <select v-model="categoria">
+          <option value="">Todas las categorías</option>
+          <option value="alojamiento_eco">Alojamiento eco</option>
+          <option value="senderismo">Senderismo</option>
+          <option value="avistamiento">Avistamiento</option>
+          <option value="comunitaria">Comunitaria</option>
+          <option value="taller_sostenible">Taller sostenible</option>
+        </select>
+
+        <label class="checkbox">
+          <input type="checkbox" v-model="usarCercania" />
+          Buscar por cercanía
+        </label>
+
+        <input v-if="usarCercania" v-model="lat" type="text" placeholder="Latitud" />
+        <input v-if="usarCercania" v-model="lng" type="text" placeholder="Longitud" />
+        <input v-if="usarCercania" v-model="radioKm" type="number" min="1" placeholder="Radio (km)" />
+
+        <button @click="cargarExperiencias">Buscar</button>
+      </section>
+
+      <p v-if="cargando">Cargando experiencias...</p>
+      <p v-if="errorMsg" class="error">{{ errorMsg }}</p>
+
+      <section class="grid">
+        <article v-for="exp in experiencias" :key="exp.id" class="card">
+          <span class="badge">{{ exp.categoria }}</span>
+          <h2>{{ exp.titulo }}</h2>
+          <p>{{ exp.descripcion }}</p>
+          <p v-if="exp.practicas_sostenibles"><strong>Sostenibilidad:</strong> {{ exp.practicas_sostenibles }}</p>
+          <p><strong>Municipio:</strong> {{ exp.municipio || 'Sin especificar' }}</p>
+          <p v-if="exp.distancia_metros !== null && exp.distancia_metros !== undefined">
+            <strong>Distancia:</strong> {{ (exp.distancia_metros / 1000).toFixed(2) }} km
+          </p>
+          <p class="precio">${{ Number(exp.precio_cop).toLocaleString('es-CO') }} COP</p>
+          <button @click="reservaForm.experiencia_id = exp.id">Seleccionar para reservar</button>
+        </article>
+      </section>
+
+      <section class="reserva-box">
+        <h2>Crear reserva</h2>
+        <form @submit.prevent="enviarReserva" class="reserva-form">
+          <label>
+            ID Experiencia
+            <input v-model.number="reservaForm.experiencia_id" type="number" min="1" required />
+          </label>
+          <label>
+            ID Viajero
+            <input v-model.number="reservaForm.viajero_id" type="number" min="1" required />
+          </label>
+          <label>
+            Fecha inicio
+            <input v-model="reservaForm.fecha_inicio" type="date" required />
+          </label>
+          <label>
+            Fecha fin
+            <input v-model="reservaForm.fecha_fin" type="date" required />
+          </label>
+          <label>
+            Cupos
+            <input v-model.number="reservaForm.cupos" type="number" min="1" required />
+          </label>
+          <button type="submit">Confirmar reserva</button>
+        </form>
+
+        <p v-if="reservaError" class="error">{{ reservaError }}</p>
+        <div v-if="reservaCreada" class="confirmacion confirmacion-grid">
+          <div>
+            <p><strong>¡Reserva confirmada!</strong></p>
+            <p>Código de validación: <code>{{ reservaCreada.codigo_validacion }}</code></p>
+            <p>Estado: <strong>{{ reservaCreada.estado }}</strong></p>
+            <p>Cupos: {{ reservaCreada.cupos }}</p>
+            <p>Total: ${{ Number(reservaCreada.total_cop).toLocaleString('es-CO') }} COP</p>
+            <button
+              type="button"
+              class="btn-secundario"
+              @click="abrirValidacionEnOtraVentana(reservaCreada.codigo_validacion)"
+            >
+              Validar código en otra ventana
+            </button>
+          </div>
+          <div class="qr-box">
+            <canvas ref="qrCreadaCanvas"></canvas>
+            <span class="qr-caption">QR de ingreso {{ reservaCreada.codigo_validacion }}</span>
+          </div>
+        </div>
+      </section>
+    </template>
   </main>
 </template>
 
 <style scoped>
 .container { max-width: 960px; margin: 0 auto; padding: 2rem 1rem; font-family: system-ui, sans-serif; }
 .header { margin-bottom: 1.5rem; }
+.top-bar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 1rem; }
+.header-actions { display: flex; flex-wrap: wrap; gap: 0.6rem; }
 .filtros { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; margin-bottom: 1.5rem; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1rem; margin-bottom: 2rem; }
 .card { border: 1px solid #d1d5db; border-radius: 10px; padding: 1rem; background: #fff; color: #111827; }
 .badge { display: inline-block; background: #dcfce7; color: #166534; padding: 0.2rem 0.6rem; border-radius: 999px; font-size: 0.8rem; }
 .precio { font-weight: 700; color: #15803d; }
 .reserva-box { border: 1px solid #d1d5db; border-radius: 10px; padding: 1.25rem; background: #f9fafb; color: #111827; margin-bottom: 1.5rem; }
-.reserva-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0.75rem; align-items: end; }
-.reserva-form label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.9rem; }
+.reserva-form, .exp-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0.75rem; align-items: end; }
+.span-2 { grid-column: span 2; }
+.reserva-form label, .exp-form label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.9rem; }
 .validacion-controls { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; }
 .detalle-reserva { margin-top: 1rem; padding: 0.85rem; border-radius: 8px; background: #fff; border: 1px solid #d1d5db; }
 .confirmacion { margin-top: 1rem; padding: 0.75rem; border-radius: 8px; background: #ecfdf5; border: 1px solid #86efac; }
@@ -317,5 +462,7 @@ onMounted(cargarExperiencias);
 .error { color: #b91c1c; font-weight: 600; margin-top: 0.75rem; }
 button { background: #15803d; color: #fff; border: none; border-radius: 6px; padding: 0.5rem 0.9rem; cursor: pointer; }
 button:hover { background: #166534; }
+.btn-secundario { background: #1f2937; }
+.btn-secundario:hover { background: #111827; }
 input, select { padding: 0.45rem; border: 1px solid #9ca3af; border-radius: 6px; }
 </style>

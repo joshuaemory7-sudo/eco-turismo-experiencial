@@ -5,7 +5,17 @@ function generarCodigoValidacion() {
   return `ECO-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
 }
 
+async function obtenerColumnasUsuarios(client) {
+  const res = await client.query(
+    `SELECT column_name
+     FROM information_schema.columns
+     WHERE table_schema = 'public' AND table_name = 'usuarios'`
+  );
+  return new Set(res.rows.map((r) => r.column_name));
+}
+
 async function obtenerOCrearViajero(client, payload) {
+  const cols = await obtenerColumnasUsuarios(client);
   const {
     viajero_id,
     nombres,
@@ -17,7 +27,7 @@ async function obtenerOCrearViajero(client, payload) {
 
   if (viajero_id && !nombres && !identificacion) {
     const resExistente = await client.query(
-      'SELECT id, nombre, email, tipo_identificacion, identificacion, telefono FROM usuarios WHERE id = $1',
+      'SELECT * FROM usuarios WHERE id = $1',
       [viajero_id]
     );
     return resExistente.rows[0] || null;
@@ -46,46 +56,64 @@ async function obtenerOCrearViajero(client, payload) {
   const nombreCompleto = `${nombresLimpios} ${apellidosLimpios}`;
   const docFormateado = `${tipoDoc} ${numDoc}`;
 
-  const buscado = await client.query(
-    `SELECT id, nombre, email, tipo_identificacion, identificacion, telefono
-     FROM usuarios
-     WHERE identificacion = $1 OR identificacion = $2
-     LIMIT 1`,
-    [numDoc, docFormateado]
-  );
-
-  if (buscado.rows.length > 0) {
-    const actual = buscado.rows[0];
-    const actualizado = await client.query(
-      `UPDATE usuarios
-       SET nombre = $1,
-           tipo_identificacion = $2,
-           identificacion = $3,
-           telefono = $4
-       WHERE id = $5
-       RETURNING id, nombre, email, tipo_identificacion, identificacion, telefono`,
-      [nombreCompleto, tipoDoc, numDoc, telefonoLimpio, actual.id]
+  if (cols.has('identificacion')) {
+    const buscado = await client.query(
+      `SELECT * FROM usuarios
+       WHERE identificacion = $1 OR identificacion = $2
+       LIMIT 1`,
+      [numDoc, docFormateado]
     );
-    return actualizado.rows[0];
+
+    if (buscado.rows.length > 0) {
+      const actual = buscado.rows[0];
+      const sets = [];
+      const vals = [];
+      let idx = 1;
+
+      if (cols.has('nombre')) { sets.push(`nombre = $${idx++}`); vals.push(nombreCompleto); }
+      if (cols.has('nombres')) { sets.push(`nombres = $${idx++}`); vals.push(nombresLimpios); }
+      if (cols.has('apellidos')) { sets.push(`apellidos = $${idx++}`); vals.push(apellidosLimpios); }
+      if (cols.has('tipo_identificacion')) { sets.push(`tipo_identificacion = $${idx++}`); vals.push(tipoDoc); }
+      if (cols.has('identificacion')) { sets.push(`identificacion = $${idx++}`); vals.push(numDoc); }
+      if (cols.has('telefono')) { sets.push(`telefono = $${idx++}`); vals.push(telefonoLimpio); }
+
+      if (sets.length > 0) {
+        vals.push(actual.id);
+        const actualizado = await client.query(
+          `UPDATE usuarios SET ${sets.join(', ')} WHERE id = $${idx} RETURNING *`,
+          vals
+        );
+        return actualizado.rows[0];
+      }
+      return actual;
+    }
   }
 
   const emailGenerado = `viajero.${tipoDoc.toLowerCase()}.${numDoc.replace(/[^a-zA-Z0-9]/g, '')}@ecoturismo.local`;
+  const insertCols = [];
+  const insertVals = [];
+
+  if (cols.has('nombre')) { insertCols.push('nombre'); insertVals.push(nombreCompleto); }
+  if (cols.has('nombres')) { insertCols.push('nombres'); insertVals.push(nombresLimpios); }
+  if (cols.has('apellidos')) { insertCols.push('apellidos'); insertVals.push(apellidosLimpios); }
+  if (cols.has('email')) { insertCols.push('email'); insertVals.push(emailGenerado); }
+  if (cols.has('correo')) { insertCols.push('correo'); insertVals.push(emailGenerado); }
+  if (cols.has('password_hash')) { insertCols.push('password_hash'); insertVals.push('registro_rapido_reserva'); }
+  if (cols.has('rol')) { insertCols.push('rol'); insertVals.push('viajero'); }
+  if (cols.has('tipo_identificacion')) { insertCols.push('tipo_identificacion'); insertVals.push(tipoDoc); }
+  if (cols.has('identificacion')) { insertCols.push('identificacion'); insertVals.push(numDoc); }
+  if (cols.has('telefono')) { insertCols.push('telefono'); insertVals.push(telefonoLimpio); }
+
+  const placeholders = insertVals.map((_, i) => `$${i + 1}`).join(', ');
   const insertado = await client.query(
-    `INSERT INTO usuarios (nombre, email, password_hash, rol, tipo_identificacion, identificacion, telefono)
-     VALUES ($1, $2, $3, 'viajero', $4, $5, $6)
-     RETURNING id, nombre, email, tipo_identificacion, identificacion, telefono`,
-    [nombreCompleto, emailGenerado, 'registro_rapido_reserva', tipoDoc, numDoc, telefonoLimpio]
+    `INSERT INTO usuarios (${insertCols.join(', ')}) VALUES (${placeholders}) RETURNING *`,
+    insertVals
   );
   return insertado.rows[0];
 }
 
 async function crearReserva(req, res) {
-  const {
-    experiencia_id,
-    fecha_inicio,
-    fecha_fin,
-    cupos,
-  } = req.body;
+  const { experiencia_id, fecha_inicio, fecha_fin, cupos } = req.body;
 
   if (!experiencia_id || !fecha_inicio || !fecha_fin || !cupos) {
     return res.status(400).json({
@@ -102,11 +130,11 @@ async function crearReserva(req, res) {
     await client.query('BEGIN');
 
     const expResult = await client.query(
-      'SELECT id, titulo, precio_cop, cupo_maximo, activo FROM experiencias WHERE id = $1',
+      'SELECT id, titulo, precio_cop, cupo_maximo, activa FROM experiencias WHERE id = $1',
       [experiencia_id]
     );
 
-    if (expResult.rows.length === 0 || !expResult.rows[0].activo) {
+    if (expResult.rows.length === 0 || !expResult.rows[0].activa) {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Experiencia no encontrada o inactiva.' });
     }
@@ -120,55 +148,38 @@ async function crearReserva(req, res) {
     }
 
     const viajero = await obtenerOCrearViajero(client, req.body);
-    if (!viajero) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Viajero no encontrado.' });
-    }
-
     const totalCop = Number(experiencia.precio_cop) * Number(cupos);
     const codigoValidacion = generarCodigoValidacion();
 
     const insertResult = await client.query(
       `INSERT INTO reservas (
-        experiencia_id,
-        viajero_id,
-        fecha_inicio,
-        fecha_fin,
-        cupos,
-        total_cop,
-        estado,
-        codigo_validacion
+        experiencia_id, viajero_id, fecha_inicio, fecha_fin, cupos, total_cop, estado, codigo_validacion
       )
       VALUES ($1, $2, $3, $4, $5, $6, 'confirmada', $7)
       RETURNING *`,
-      [
-        experiencia_id,
-        viajero.id,
-        fecha_inicio,
-        fecha_fin,
-        cupos,
-        totalCop,
-        codigoValidacion,
-      ]
+      [experiencia_id, viajero.id, fecha_inicio, fecha_fin, cupos, totalCop, codigoValidacion]
     );
 
     await client.query('COMMIT');
 
-    const reserva = insertResult.rows[0];
+    const nombreViajero =
+      viajero.nombre ||
+      [viajero.nombres, viajero.apellidos].filter(Boolean).join(' ') ||
+      `${req.body.nombres} ${req.body.apellidos}`;
+
     return res.status(201).json({
       reserva: {
-        ...reserva,
+        ...insertResult.rows[0],
         experiencia_titulo: experiencia.titulo,
-        viajero_nombre: viajero.nombre,
-        viajero_tipo_identificacion: viajero.tipo_identificacion,
-        viajero_identificacion: viajero.identificacion,
-        viajero_telefono: viajero.telefono,
+        viajero_nombre: nombreViajero,
+        viajero_tipo_identificacion: viajero.tipo_identificacion || req.body.tipo_identificacion || 'CC',
+        viajero_identificacion: viajero.identificacion || req.body.identificacion,
+        viajero_telefono: viajero.telefono || req.body.telefono,
       },
     });
   } catch (error) {
     await client.query('ROLLBACK');
-    const status = error.statusCode || 500;
-    return res.status(status).json({ error: error.message });
+    return res.status(error.statusCode || 500).json({ error: error.message });
   } finally {
     client.release();
   }
@@ -182,10 +193,7 @@ async function consultarReservaPorCodigo(req, res) {
         r.*,
         e.titulo AS experiencia_titulo,
         e.municipio AS experiencia_municipio,
-        u.nombre AS viajero_nombre,
-        u.tipo_identificacion AS viajero_tipo_identificacion,
-        u.identificacion AS viajero_identificacion,
-        u.telefono AS viajero_telefono
+        to_jsonb(u) AS viajero_data
       FROM reservas r
       JOIN experiencias e ON e.id = r.experiencia_id
       JOIN usuarios u ON u.id = r.viajero_id
@@ -197,7 +205,22 @@ async function consultarReservaPorCodigo(req, res) {
       return res.status(404).json({ error: 'Reserva no encontrada con ese código.' });
     }
 
-    return res.json({ reserva: result.rows[0] });
+    const row = result.rows[0];
+    const u = row.viajero_data || {};
+    const nombreViajero =
+      u.nombre || [u.nombres, u.apellidos].filter(Boolean).join(' ') || `Viajero #${row.viajero_id}`;
+
+    delete row.viajero_data;
+
+    return res.json({
+      reserva: {
+        ...row,
+        viajero_nombre: nombreViajero,
+        viajero_tipo_identificacion: u.tipo_identificacion || 'CC',
+        viajero_identificacion: u.identificacion || null,
+        viajero_telefono: u.telefono || null,
+      },
+    });
   } catch (error) {
     return res.status(500).json({ error: error.message });
   }
@@ -228,10 +251,7 @@ async function validarIngresoReserva(req, res) {
     }
 
     const updated = await pool.query(
-      `UPDATE reservas
-       SET estado = 'ingresada'
-       WHERE id = $1
-       RETURNING *`,
+      `UPDATE reservas SET estado = 'ingresada' WHERE id = $1 RETURNING *`,
       [reserva.id]
     );
 
